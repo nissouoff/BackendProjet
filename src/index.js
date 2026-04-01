@@ -821,6 +821,49 @@ app.put('/api/orders/:id/status', async (req, res) => {
   }
 });
 
+app.delete('/api/orders/:id', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+    
+    const token = authHeader.split('Bearer ')[1];
+    const user = await verifyIdToken(token);
+    
+    const { id } = req.params;
+    
+    const order = await rtdbRequest(`/orders/${id}`);
+    
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+    
+    const landingsData = await rtdbRequest('/landings');
+    let isOwner = false;
+    
+    if (landingsData) {
+      for (const doc of Object.values(landingsData)) {
+        if ((doc.slug === order.landingSlug || doc.id === order.landingId) && doc.userId === user.uid) {
+          isOwner = true;
+          break;
+        }
+      }
+    }
+    
+    if (!isOwner) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    
+    await rtdbRequest(`/orders/${id}`, 'DELETE');
+    
+    res.json({ message: 'Order deleted successfully' });
+  } catch (error) {
+    console.error('Delete order error:', error);
+    res.status(500).json({ message: error.message || 'Failed to delete order' });
+  }
+});
+
 app.get('/api/wilayas', (req, res) => {
   res.json({ wilayas: WILAYAS });
 });
