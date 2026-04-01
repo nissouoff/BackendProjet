@@ -400,7 +400,7 @@ app.post('/api/landings', async (req, res) => {
     }
     
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-    const id = slug + '-' + Date.now();
+    const id = `${slug}-${user.uid.slice(0, 8)}-${Date.now()}`;
     
     const defaultProduct = isLanding ? [{
       id: 'product_1',
