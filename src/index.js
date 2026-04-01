@@ -678,13 +678,11 @@ app.get('/api/orders', async (req, res) => {
     const limitNum = Math.min(parseInt(limit) || 100, 500);
     
     const landingsData = await rtdbRequest('/landings');
-    const userLandings = new Map();
     const userLandingIds = new Set();
     
     if (landingsData) {
       for (const [id, doc] of Object.entries(landingsData)) {
         if (doc.userId === user.uid) {
-          userLandings.set(doc.slug, id);
           userLandingIds.add(id);
         }
       }
@@ -695,15 +693,11 @@ app.get('/api/orders', async (req, res) => {
     
     if (ordersData) {
       for (const [id, doc] of Object.entries(ordersData)) {
-        const orderLandingSlug = doc.landingSlug;
         const orderLandingId = doc.landingId;
         
-        // Check by slug OR by id
-        const isOwnerBySlug = userLandings.has(orderLandingSlug);
-        const isOwnerById = userLandingIds.has(orderLandingId);
-        
-        if (isOwnerBySlug || isOwnerById) {
-          if (!landingSlug || landingSlug === orderLandingSlug) {
+        // Only check by id (slug is not unique across users)
+        if (userLandingIds.has(orderLandingId)) {
+          if (!landingSlug || landingSlug === doc.landingSlug) {
             orders.push({ id, ...doc });
           }
         }
@@ -888,14 +882,12 @@ app.get('/api/analytics', async (req, res) => {
     
     const landingsData = await rtdbRequest('/landings');
     const userLandings = [];
-    const userLandingSlugs = new Set();
     const userLandingIds = new Set();
     
     if (landingsData) {
       for (const [id, doc] of Object.entries(landingsData)) {
         if (doc.userId === user.uid) {
           userLandings.push({ id, ...doc });
-          userLandingSlugs.add(doc.slug);
           userLandingIds.add(id);
         }
       }
@@ -910,7 +902,7 @@ app.get('/api/analytics', async (req, res) => {
     
     if (ordersData) {
       for (const [id, doc] of Object.entries(ordersData)) {
-        if (userLandingSlugs.has(doc.landingSlug) || userLandingIds.has(doc.landingId)) {
+        if (userLandingIds.has(doc.landingId)) {
           userOrders.push({ id, ...doc });
         }
       }
