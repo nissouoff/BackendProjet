@@ -679,11 +679,13 @@ app.get('/api/orders', async (req, res) => {
     
     const landingsData = await rtdbRequest('/landings');
     const userLandings = new Map();
+    const userLandingIds = new Set();
     
     if (landingsData) {
       for (const [id, doc] of Object.entries(landingsData)) {
         if (doc.userId === user.uid) {
           userLandings.set(doc.slug, id);
+          userLandingIds.add(id);
         }
       }
     }
@@ -694,7 +696,13 @@ app.get('/api/orders', async (req, res) => {
     if (ordersData) {
       for (const [id, doc] of Object.entries(ordersData)) {
         const orderLandingSlug = doc.landingSlug;
-        if (userLandings.has(orderLandingSlug)) {
+        const orderLandingId = doc.landingId;
+        
+        // Check by slug OR by id
+        const isOwnerBySlug = userLandings.has(orderLandingSlug);
+        const isOwnerById = userLandingIds.has(orderLandingId);
+        
+        if (isOwnerBySlug || isOwnerById) {
           if (!landingSlug || landingSlug === orderLandingSlug) {
             orders.push({ id, ...doc });
           }
@@ -880,13 +888,15 @@ app.get('/api/analytics', async (req, res) => {
     
     const landingsData = await rtdbRequest('/landings');
     const userLandings = [];
-    const userLandingSlugs = [];
+    const userLandingSlugs = new Set();
+    const userLandingIds = new Set();
     
     if (landingsData) {
       for (const [id, doc] of Object.entries(landingsData)) {
         if (doc.userId === user.uid) {
           userLandings.push({ id, ...doc });
-          userLandingSlugs.push(doc.slug);
+          userLandingSlugs.add(doc.slug);
+          userLandingIds.add(id);
         }
       }
     }
@@ -900,7 +910,7 @@ app.get('/api/analytics', async (req, res) => {
     
     if (ordersData) {
       for (const [id, doc] of Object.entries(ordersData)) {
-        if (userLandingSlugs.includes(doc.landingSlug)) {
+        if (userLandingSlugs.has(doc.landingSlug) || userLandingIds.has(doc.landingId)) {
           userOrders.push({ id, ...doc });
         }
       }
