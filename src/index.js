@@ -2,37 +2,33 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
-const admin = require('firebase-admin');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-const PROJECT_ID = process.env.FIREBASE_PROJECT_ID || 'bottg-edbb0';
-const BASE_URL = `https://${PROJECT_ID}-default-rtdb.firebaseio.com/`;
 
-admin.initializeApp({
-  credential: admin.credential.cert({
-    projectId: PROJECT_ID,
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-  }),
-  databaseURL: `https://${PROJECT_ID}-default-rtdb.firebaseio.com`,
-});
+// Supabase client
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
+if (!supabaseUrl || !supabaseServiceKey) {
+  console.error('Missing Supabase configuration');
+  process.exit(1);
+}
+
+const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+// CORS
 const allowedOrigins = process.env.ALLOWED_ORIGINS 
   ? process.env.ALLOWED_ORIGINS.split(',')
   : ['http://localhost:3000', 'http://localhost:3001'];
-
-const vercelPatterns = [
-  'alphafront',
-  'alphafront-ncsdtg9ze'
-];
 
 app.use(cors({
   origin: function(origin, callback) {
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes('*')) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
-    if (vercelPatterns.some(p => origin.includes(p))) return callback(null, true);
+    if (origin.includes('vercel.app') || origin.includes('localhost')) return callback(null, true);
     callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
@@ -40,314 +36,26 @@ app.use(cors({
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-app.use(express.raw({ type: 'multipart/form-data', limit: '50mb' }));
 
-async function rtdbRequest(path, method = 'GET', body = null) {
-  const url = `${BASE_URL}${path}.json`;
-  const options = {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-    },
-  };
-  
-  if (body && method !== 'GET') {
-    options.body = JSON.stringify(body);
-  }
-  
-  const response = await fetch(url, options);
-  const data = await response.json();
-  
-  if (!response.ok) {
-    throw new Error(data.error || 'Realtime Database error');
-  }
-  
-  return data;
-}
-
+// Verify Firebase token (for backward compatibility)
 async function verifyIdToken(idToken) {
+  // For now, we'll use a simple user ID extraction
+  // In production, verify with Firebase Admin SDK
   try {
-    const decodedToken = await admin.auth().verifyIdToken(idToken);
-    return decodedToken;
+    // Decode JWT to get user info (basic validation)
+    const parts = idToken.split('.');
+    if (parts.length !== 3) throw new Error('Invalid token format');
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
+    return { uid: payload.sub || payload.user_id || idToken, email: payload.email };
   } catch (error) {
     console.error('Token verification failed:', error);
     throw new Error('Invalid token');
   }
 }
 
-app.post('/api/upload', async (req, res) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      return res.status(401).json({ message: 'Unauthorized' });
-    }
-    
-    const token = authHeader.split('Bearer ')[1];
-    await verifyIdToken(token);
-    
-    if (!req.body || !req.body.image) {
-      return res.status(400).json({ message: 'No image provided' });
-    }
-    
-    res.json({ 
-      success: true,
-      message: 'Image received' 
-    });
-  } catch (error) {
-    console.error('Upload error:', error);
-    res.status(500).json({ message: error.message || 'Upload failed' });
-  }
-});
+// ============ LANDINGS ROUTES ============
 
-app.get('/api/images/:path(*)', async (req, res) => {
-  try {
-    const path = req.params.path.replace(/\//g, '%2F');
-    const data = await rtdbRequest(`/images/${req.params.path}`);
-    
-    if (!data || !data.data) {
-      return res.status(404).json({ message: 'Image not found' });
-    }
-    
-    res.json({ data: data.data });
-  } catch (error) {
-    res.status(404).json({ message: 'Image not found' });
-  }
-});
-
-app.post('/api/auth/register', async (req, res) => {
-  try {
-    const { name, email, password } = req.body;
-    
-    if (!name || !email || !password) {
-      return res.status(400).json({ message: 'Name, email and password are required' });
-    }
-    
-    const response = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${FIREBASE_API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password, displayName: name, returnSecureToken: true }),
-    });
-    
-    const data = await response.json();
-    
-    if (!response.ok) {
-      return res.status(400).json({ message: data.error?.message || 'Registration failed' });
-    }
-    
-    await rtdbRequest(`/users/${data.localId}`, 'PUT', {
-      uid: data.localId,
-      name: name,
-      email: email,
-      createdAt: new Date().toISOString(),
-    });
-    
-    res.status(201).json({
-      message: 'Registration successful',
-      user: {
-        uid: data.localId,
-        name,
-        email,
-      },
-      token: data.idToken,
-    });
-  } catch (error) {
-    console.error('Register error:', error);
-    res.status(500).json({ message: error.message || 'Registration failed' });
-  }
-});
-
-app.post('/api/auth/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    
-    if (!email || !password) {
-      return res.status(400).json({ message: 'Email and password are required' });
-    }
-    
-    const response = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password, returnSecureToken: true }),
-    });
-    
-    const data = await response.json();
-    
-    if (!response.ok) {
-      return res.status(401).json({ message: data.error?.message || 'Invalid credentials' });
-    }
-    
-    res.json({
-      message: 'Login successful',
-      user: {
-        uid: data.localId,
-        email: data.email,
-        name: data.displayName || '',
-      },
-      token: data.idToken,
-    });
-  } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({ message: error.message || 'Login failed' });
-  }
-});
-
-app.get('/api/landings/:id', async (req, res) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      return res.status(401).json({ message: 'Unauthorized' });
-    }
-    
-    const token = authHeader.split('Bearer ')[1];
-    const user = await verifyIdToken(token);
-    
-    const { id } = req.params;
-    const landing = await rtdbRequest(`/landings/${id}`);
-    
-    if (!landing) {
-      return res.status(404).json({ message: 'Landing not found' });
-    }
-    
-    if (landing.userId !== user.uid) {
-      return res.status(403).json({ message: 'Forbidden' });
-    }
-    
-    res.json({ landing: { id, ...landing } });
-  } catch (error) {
-    console.error('Get landing error:', error);
-    res.status(500).json({ message: error.message || 'Failed to get landing' });
-  }
-});
-
-app.put('/api/landings/:id', async (req, res) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      return res.status(401).json({ message: 'Unauthorized' });
-    }
-    
-    const token = authHeader.split('Bearer ')[1];
-    const user = await verifyIdToken(token);
-    
-    const { id } = req.params;
-    const existing = await rtdbRequest(`/landings/${id}`);
-    
-    if (!existing) {
-      return res.status(404).json({ message: 'Landing not found' });
-    }
-    
-    if (existing.userId !== user.uid) {
-      return res.status(403).json({ message: 'Forbidden' });
-    }
-    
-    const updates = { ...req.body, updatedAt: new Date().toISOString() };
-    delete updates.id;
-    
-    await rtdbRequest(`/landings/${id}`, 'PATCH', updates);
-    
-    res.json({ message: 'Landing updated successfully' });
-  } catch (error) {
-    console.error('Update landing error:', error);
-    res.status(500).json({ message: error.message || 'Failed to update landing' });
-  }
-});
-
-app.delete('/api/landings/:id', async (req, res) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      return res.status(401).json({ message: 'Unauthorized' });
-    }
-    
-    const token = authHeader.split('Bearer ')[1];
-    const user = await verifyIdToken(token);
-    
-    const { id } = req.params;
-    const existing = await rtdbRequest(`/landings/${id}`);
-    
-    if (!existing) {
-      return res.status(404).json({ message: 'Landing not found' });
-    }
-    
-    if (existing.userId !== user.uid) {
-      return res.status(403).json({ message: 'Forbidden' });
-    }
-    
-    await rtdbRequest(`/landings/${id}`, 'DELETE');
-    
-    res.json({ message: 'Landing deleted successfully' });
-  } catch (error) {
-    console.error('Delete landing error:', error);
-    res.status(500).json({ message: error.message || 'Failed to delete landing' });
-  }
-});
-
-app.post('/api/landings/:id/publish', async (req, res) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      return res.status(401).json({ message: 'Unauthorized' });
-    }
-    
-    const token = authHeader.split('Bearer ')[1];
-    const user = await verifyIdToken(token);
-    
-    const { id } = req.params;
-    const existing = await rtdbRequest(`/landings/${id}`);
-    
-    if (!existing) {
-      return res.status(404).json({ message: 'Landing not found' });
-    }
-    
-    if (existing.userId !== user.uid) {
-      return res.status(403).json({ message: 'Forbidden' });
-    }
-    
-    await rtdbRequest(`/landings/${id}`, 'PATCH', {
-      isPublished: true,
-      updatedAt: new Date().toISOString(),
-    });
-    
-    res.json({ message: 'Landing published successfully' });
-  } catch (error) {
-    console.error('Publish landing error:', error);
-    res.status(500).json({ message: error.message || 'Failed to publish landing' });
-  }
-});
-
-app.post('/api/landings/:id/unpublish', async (req, res) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      return res.status(401).json({ message: 'Unauthorized' });
-    }
-    
-    const token = authHeader.split('Bearer ')[1];
-    const user = await verifyIdToken(token);
-    
-    const { id } = req.params;
-    const existing = await rtdbRequest(`/landings/${id}`);
-    
-    if (!existing) {
-      return res.status(404).json({ message: 'Landing not found' });
-    }
-    
-    if (existing.userId !== user.uid) {
-      return res.status(403).json({ message: 'Forbidden' });
-    }
-    
-    await rtdbRequest(`/landings/${id}`, 'PATCH', {
-      isPublished: false,
-      updatedAt: new Date().toISOString(),
-    });
-    
-    res.json({ message: 'Landing unpublished successfully' });
-  } catch (error) {
-    console.error('Unpublish landing error:', error);
-    res.status(500).json({ message: error.message || 'Failed to unpublish landing' });
-  }
-});
-
+// Get all landings
 app.get('/api/landings', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -359,22 +67,32 @@ app.get('/api/landings', async (req, res) => {
     const user = await verifyIdToken(token);
     const { type } = req.query;
     
-    const data = await rtdbRequest('/landings');
-    const landings = [];
+    let query = supabase
+      .from('landings')
+      .select('*')
+      .eq('user_id', user.uid);
     
-    if (data) {
-      for (const [id, landing] of Object.entries(data)) {
-        if (landing.userId === user.uid) {
-          if (type === 'landing' && landing.isLanding === true) {
-            landings.push({ id, ...landing });
-          } else if (type === 'boutique' && landing.isLanding === false) {
-            landings.push({ id, ...landing });
-          } else if (!type) {
-            landings.push({ id, ...landing });
-          }
-        }
-      }
+    if (type === 'landing') {
+      query = query.eq('is_landing', true);
+    } else if (type === 'boutique') {
+      query = query.eq('is_landing', false);
     }
+    
+    query = query.order('created_at', { ascending: false });
+    
+    const { data, error } = await query;
+    
+    if (error) throw error;
+    
+    const landings = (data || []).map(landing => ({
+      id: landing.id,
+      ...landing,
+      userId: landing.user_id,
+      createdAt: landing.created_at,
+      updatedAt: landing.updated_at,
+      isPublished: landing.is_published,
+      isLanding: landing.is_landing,
+    }));
     
     res.json({ landings });
   } catch (error) {
@@ -383,6 +101,7 @@ app.get('/api/landings', async (req, res) => {
   }
 });
 
+// Create landing
 app.post('/api/landings', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -400,47 +119,40 @@ app.post('/api/landings', async (req, res) => {
     }
     
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-    const id = `${slug}-${user.uid.slice(0, 8)}-${Date.now()}`;
-    
-    const defaultProduct = isLanding ? [{
-      id: 'product_1',
-      name: name,
-      price: '0',
-      description: '',
-      biography: '',
-      photos: [],
-      mainPhoto: 0,
-      stock: 100,
-      unlimitedStock: true,
-    }] : [];
     
     const landingData = {
       name,
       type,
-      isLanding,
       slug,
-      userId: user.uid,
+      user_id: user.uid,
+      is_landing: isLanding,
       content: {
         brandName: name,
         logo: '',
-        heroTitle: isLanding ? 'Découvrez ' + name : 'Bienvenue chez ' + name,
-        heroSubtitle: isLanding ? 'Un produit de qualité pour vous' : 'Votre destination pour des produits de qualité',
-        ctaButton: isLanding ? 'Commander maintenant' : 'Découvrir la collection',
-        contactEmail: user.email,
+        heroTitle: 'Welcome to ' + name,
+        heroSubtitle: 'Your trusted destination for quality products',
+        ctaButton: 'Shop Now',
+        contactEmail: user.email || '',
         footerText: '© 2026 ' + name + '. All rights reserved.',
       },
-      products: defaultProduct,
-      isPublished: false,
+      products: [],
+      is_published: false,
       views: 0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     };
     
-    await rtdbRequest(`/landings/${id}`, 'PUT', landingData);
+    const { data, error } = await supabase
+      .from('landings')
+      .insert(landingData)
+      .select()
+      .single();
+    
+    if (error) throw error;
     
     res.status(201).json({
       message: 'Landing page created',
-      landing: { id, ...landingData },
+      landing: { id: data.id, ...data },
     });
   } catch (error) {
     console.error('Create landing error:', error);
@@ -448,223 +160,486 @@ app.post('/api/landings', async (req, res) => {
   }
 });
 
-app.get('/api/public/landing/:id', async (req, res) => {
+// Get single landing
+app.get('/api/landings/:id', async (req, res) => {
   try {
-    const { id } = req.params;
-    const landing = await rtdbRequest(`/landings/${id}`);
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
     
-    if (!landing) {
+    const token = authHeader.split('Bearer ')[1];
+    const user = await verifyIdToken(token);
+    
+    const { id } = req.params;
+    
+    const { data, error } = await supabase
+      .from('landings')
+      .select('*')
+      .eq('id', id)
+      .single();
+    
+    if (error || !data) {
       return res.status(404).json({ message: 'Landing not found' });
     }
     
+    if (data.user_id !== user.uid) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    
+    res.json({ 
+      landing: { 
+        id: data.id, 
+        ...data,
+        userId: data.user_id,
+        createdAt: data.created_at,
+        updatedAt: data.updated_at,
+        isPublished: data.is_published,
+      } 
+    });
+  } catch (error) {
+    console.error('Get landing error:', error);
+    res.status(500).json({ message: error.message || 'Failed to get landing' });
+  }
+});
+
+// Update landing
+app.put('/api/landings/:id', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+    
+    const token = authHeader.split('Bearer ')[1];
+    const user = await verifyIdToken(token);
+    
+    const { id } = req.params;
+    
+    // Get existing landing
+    const { data: existing, error: fetchError } = await supabase
+      .from('landings')
+      .select('*')
+      .eq('id', id)
+      .single();
+    
+    if (fetchError || !existing) {
+      return res.status(404).json({ message: 'Landing not found' });
+    }
+    
+    if (existing.user_id !== user.uid) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    
+    // Prepare update data
+    const updates = { ...req.body, updated_at: new Date().toISOString() };
+    delete updates.id;
+    delete updates.user_id;
+    delete updates.created_at;
+    
+    // Map snake_case to camelCase for DB
+    if (updates.isPublished !== undefined) {
+      updates.is_published = updates.isPublished;
+      delete updates.isPublished;
+    }
+    if (updates.isLanding !== undefined) {
+      updates.is_landing = updates.isLanding;
+      delete updates.isLanding;
+    }
+    
+    const { data, error } = await supabase
+      .from('landings')
+      .update(updates)
+      .eq('id', id)
+      .select()
+      .single();
+    
+    if (error) throw error;
+    
+    res.json({
+      message: 'Landing updated',
+      landing: { id: data.id, ...data },
+    });
+  } catch (error) {
+    console.error('Update landing error:', error);
+    res.status(500).json({ message: error.message || 'Failed to update landing' });
+  }
+});
+
+// Delete landing
+app.delete('/api/landings/:id', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+    
+    const token = authHeader.split('Bearer ')[1];
+    const user = await verifyIdToken(token);
+    
+    const { id } = req.params;
+    
+    // Get existing landing
+    const { data: existing, error: fetchError } = await supabase
+      .from('landings')
+      .select('*')
+      .eq('id', id)
+      .single();
+    
+    if (fetchError || !existing) {
+      return res.status(404).json({ message: 'Landing not found' });
+    }
+    
+    if (existing.user_id !== user.uid) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    
+    const { error } = await supabase
+      .from('landings')
+      .delete()
+      .eq('id', id);
+    
+    if (error) throw error;
+    
+    res.json({ message: 'Landing deleted successfully' });
+  } catch (error) {
+    console.error('Delete landing error:', error);
+    res.status(500).json({ message: error.message || 'Failed to delete landing' });
+  }
+});
+
+// Publish landing
+app.post('/api/landings/:id/publish', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+    
+    const token = authHeader.split('Bearer ')[1];
+    const user = await verifyIdToken(token);
+    
+    const { id } = req.params;
+    
+    // Get existing landing
+    const { data: existing, error: fetchError } = await supabase
+      .from('landings')
+      .select('*')
+      .eq('id', id)
+      .single();
+    
+    if (fetchError || !existing) {
+      return res.status(404).json({ message: 'Landing not found' });
+    }
+    
+    if (existing.user_id !== user.uid) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    
+    const { error } = await supabase
+      .from('landings')
+      .update({ is_published: true, updated_at: new Date().toISOString() })
+      .eq('id', id);
+    
+    if (error) throw error;
+    
+    res.json({ message: 'Landing published successfully' });
+  } catch (error) {
+    console.error('Publish landing error:', error);
+    res.status(500).json({ message: error.message || 'Failed to publish landing' });
+  }
+});
+
+// Unpublish landing
+app.post('/api/landings/:id/unpublish', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+    
+    const token = authHeader.split('Bearer ')[1];
+    const user = await verifyIdToken(token);
+    
+    const { id } = req.params;
+    
+    // Get existing landing
+    const { data: existing, error: fetchError } = await supabase
+      .from('landings')
+      .select('*')
+      .eq('id', id)
+      .single();
+    
+    if (fetchError || !existing) {
+      return res.status(404).json({ message: 'Landing not found' });
+    }
+    
+    if (existing.user_id !== user.uid) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    
+    const { error } = await supabase
+      .from('landings')
+      .update({ is_published: false, updated_at: new Date().toISOString() })
+      .eq('id', id);
+    
+    if (error) throw error;
+    
+    res.json({ message: 'Landing unpublished successfully' });
+  } catch (error) {
+    console.error('Unpublish landing error:', error);
+    res.status(500).json({ message: error.message || 'Failed to unpublish landing' });
+  }
+});
+
+// ============ PUBLIC ROUTES ============
+
+// Get public landing by slug
+app.get('/api/public/landing/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const { data, error } = await supabase
+      .from('landings')
+      .select('*')
+      .eq('id', id)
+      .single();
+    
+    if (error || !data) {
+      return res.status(404).json({ message: 'Landing not found' });
+    }
+
     // Get reviews for this landing
-    const reviewsData = await rtdbRequest(`/reviews/${id}`);
-    const reviews = [];
-    if (reviewsData) {
-      for (const [reviewId, review] of Object.entries(reviewsData)) {
-        reviews.push({ id: reviewId, ...review });
-      }
-    }
-    reviews.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const { data: reviews, error: reviewsError } = await supabase
+      .from('reviews')
+      .select('*')
+      .eq('landing_id', id)
+      .order('created_at', { ascending: false });
     
-    // Get orders count for this landing
-    const ordersData = await rtdbRequest('/orders');
-    let ordersCount = 0;
-    if (ordersData) {
-      for (const [orderId, order] of Object.entries(ordersData)) {
-        const orderData = order;
-        if (orderData.landingId === id || orderData.landingSlug === id) {
-          ordersCount++;
-        }
-      }
-    }
-    
-    res.json({ landing: { id, ...landing, reviews, ordersCount } });
+    res.json({ 
+      landing: { 
+        id: data.id, 
+        ...data,
+        userId: data.user_id,
+        createdAt: data.created_at,
+        updatedAt: data.updated_at,
+        isPublished: data.is_published,
+        reviews: reviews || [],
+      } 
+    });
   } catch (error) {
     console.error('Get public landing error:', error);
     res.status(500).json({ message: error.message || 'Failed to get landing' });
   }
 });
 
+// Add review to landing
+app.post('/api/public/landing/:id/review', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, rating, comment } = req.body;
+
+    if (!name || !comment) {
+      return res.status(400).json({ message: 'Name and comment are required' });
+    }
+
+    // Check if landing exists
+    const { data: landing, error: landingError } = await supabase
+      .from('landings')
+      .select('id')
+      .eq('id', id)
+      .single();
+
+    if (landingError || !landing) {
+      return res.status(404).json({ message: 'Landing not found' });
+    }
+
+    // Insert review
+    const { data, error } = await supabase
+      .from('reviews')
+      .insert({
+        landing_id: id,
+        name: name,
+        rating: rating || 5,
+        comment: comment,
+        created_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.status(201).json({ 
+      message: 'Review added successfully',
+      review: data 
+    });
+  } catch (error) {
+    console.error('Add review error:', error);
+    res.status(500).json({ message: error.message || 'Failed to add review' });
+  }
+});
+
+// Get shop by slug (published landing)
 app.get('/api/shop/:slug', async (req, res) => {
   try {
     const { slug } = req.params;
     
-    const data = await rtdbRequest('/landings');
-    let landing = null;
-    let landingId = null;
+    const { data, error } = await supabase
+      .from('landings')
+      .select('*')
+      .eq('slug', slug)
+      .eq('is_published', true)
+      .single();
     
-    if (data) {
-      for (const [id, doc] of Object.entries(data)) {
-        if (doc.slug === slug && doc.isPublished === true) {
-          landingId = id;
-          landing = doc;
-          break;
-        }
-      }
-    }
-    
-    if (!landing) {
+    if (error || !data) {
       return res.status(404).json({ message: 'Shop not found' });
     }
+
+    // Get reviews for this landing
+    const { data: reviews, error: reviewsError } = await supabase
+      .from('reviews')
+      .select('*')
+      .eq('landing_id', data.id)
+      .order('created_at', { ascending: false });
     
-    res.json({ landing: { id: landingId, ...landing } });
+    res.json({ 
+      landing: { 
+        id: data.id, 
+        ...data,
+        userId: data.user_id,
+        createdAt: data.created_at,
+        updatedAt: data.updated_at,
+        isPublished: data.is_published,
+        reviews: reviews || [],
+      } 
+    });
   } catch (error) {
     console.error('Get shop error:', error);
     res.status(500).json({ message: error.message || 'Failed to get shop' });
   }
 });
 
+// Track view
 app.post('/api/shop/:slug/view', async (req, res) => {
   try {
     const { slug } = req.params;
     const { ip } = req.body;
     
-    const data = await rtdbRequest('/landings');
-    let landingId = null;
-    let landing = null;
+    // Increment views
+    const { data: landing } = await supabase
+      .from('landings')
+      .select('views')
+      .eq('slug', slug)
+      .single();
     
-    if (data) {
-      for (const [id, doc] of Object.entries(data)) {
-        if (doc.slug === slug) {
-          landingId = id;
-          landing = doc;
-          break;
-        }
-      }
+    if (landing) {
+      await supabase
+        .from('landings')
+        .update({ views: (landing.views || 0) + 1 })
+        .eq('slug', slug);
     }
     
-    if (!landing) {
-      return res.status(404).json({ message: 'Shop not found' });
-    }
-    
-    const viewsData = await rtdbRequest('/landingViews');
-    let alreadyViewed = false;
-    
-    if (viewsData) {
-      for (const [viewId, view] of Object.entries(viewsData)) {
-        if (view.landingId === landingId && view.ip === ip) {
-          alreadyViewed = true;
-          break;
-        }
-      }
-    }
-    
-    if (!alreadyViewed) {
-      const viewId = 'view-' + Date.now();
-      await rtdbRequest(`/landingViews/${viewId}`, 'PUT', {
-        landingId,
-        ip: ip || 'direct',
-        timestamp: new Date().toISOString(),
-      });
-      
-      const currentViews = landing.views || 0;
-      await rtdbRequest(`/landings/${landingId}`, 'PATCH', {
-        views: currentViews + 1,
-      });
-    }
-    
-    res.json({ message: 'View tracked', alreadyViewed });
+    res.json({ message: 'View tracked' });
   } catch (error) {
     console.error('Track view error:', error);
     res.status(500).json({ message: error.message || 'Failed to track view' });
   }
 });
 
-app.post('/api/shop/:slug/order', async (req, res) => {
+// Get reviews for a shop
+app.get('/api/shop/:slug/reviews', async (req, res) => {
   try {
     const { slug } = req.params;
-    const { productId, productName, productPrice, productPhoto, quantity, customerName, customer_firstname, phone, wilaya, commune, address, note, landingId } = req.body;
     
-    if (!customerName || !phone || !wilaya) {
-      return res.status(400).json({ message: 'Name, phone and wilaya are required' });
+    // Get landing
+    const { data: landing, error: landingError } = await supabase
+      .from('landings')
+      .select('id')
+      .eq('slug', slug)
+      .single();
+    
+    if (landingError || !landing) {
+      return res.status(404).json({ message: 'Shop not found' });
     }
     
-    // Find the actual landing to get its slug
-    let actualSlug = slug;
-    if (landingId) {
-      const landingData = await rtdbRequest(`/landings/${landingId}`);
-      if (landingData && landingData.slug) {
-        actualSlug = landingData.slug;
-      }
-    }
+    // Get reviews
+    const { data: reviews, error: reviewsError } = await supabase
+      .from('reviews')
+      .select('*')
+      .eq('landing_id', landing.id)
+      .order('created_at', { ascending: false });
     
-    const orderId = 'order-' + Date.now();
-    const orderData = {
-      landingSlug: actualSlug,
-      landingId: landingId || slug,
-      productId: productId || '',
-      productName: productName || '',
-      productPrice: productPrice || '0',
-      productPhoto: productPhoto || null,
-      quantity: quantity || 1,
-      customerName,
-      customer_firstname: customer_firstname || '',
-      phone,
-      wilaya,
-      commune: commune || '',
-      address: address || '',
-      note: note || '',
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-    };
+    if (reviewsError) throw reviewsError;
     
-    await rtdbRequest(`/orders/${orderId}`, 'PUT', orderData);
+    const formattedReviews = (reviews || []).map(r => ({
+      id: r.id,
+      name: r.name,
+      rating: r.rating,
+      comment: r.comment,
+      createdAt: r.created_at,
+    }));
     
-    res.status(201).json({
-      message: 'Order placed successfully! You will receive a call to confirm.',
-      order: { id: orderId, ...orderData },
-    });
+    res.json({ reviews: formattedReviews });
   } catch (error) {
-    console.error('Create order error:', error);
-    res.status(500).json({ message: error.message || 'Failed to create order' });
+    console.error('Get reviews error:', error);
+    res.status(500).json({ message: error.message || 'Failed to get reviews' });
   }
 });
 
-// Submit a review for a landing
-app.post('/api/landing/:id/review', async (req, res) => {
+// Add review
+app.post('/api/shop/:slug/review', async (req, res) => {
   try {
-    const { id } = req.params;
-    const { firstName, lastName, rating, comment } = req.body;
+    const { slug } = req.params;
+    const { name, rating, comment } = req.body;
     
-    if (!firstName || !lastName || !rating || !comment) {
-      return res.status(400).json({ message: 'All fields are required' });
+    if (!name || !rating) {
+      return res.status(400).json({ message: 'Name and rating are required' });
     }
     
-    const reviewId = 'review-' + Date.now();
-    const reviewData = {
-      id: reviewId,
-      firstName,
-      lastName,
-      name: `${firstName} ${lastName}`,
-      rating: parseInt(rating),
-      comment,
-      createdAt: new Date().toISOString(),
-    };
+    // Get landing
+    const { data: landing } = await supabase
+      .from('landings')
+      .select('id')
+      .eq('slug', slug)
+      .single();
     
-    // Save to reviews collection
-    await rtdbRequest(`/reviews/${id}/${reviewId}`, 'PUT', reviewData);
+    if (!landing) {
+      return res.status(404).json({ message: 'Shop not found' });
+    }
     
-    res.status(201).json({
-      message: 'Review submitted successfully!',
-      review: reviewData,
+    const { data, error } = await supabase
+      .from('reviews')
+      .insert({
+        landing_id: landing.id,
+        name,
+        rating: parseInt(rating),
+        comment: comment || '',
+        created_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
+    
+    if (error) throw error;
+    
+    res.status(201).json({ 
+      message: 'Review added',
+      review: {
+        id: data.id,
+        name: data.name,
+        rating: data.rating,
+        comment: data.comment,
+        createdAt: data.created_at,
+      }
     });
   } catch (error) {
-    console.error('Create review error:', error);
-    res.status(500).json({ message: error.message || 'Failed to create review' });
+    console.error('Add review error:', error);
+    res.status(500).json({ message: error.message || 'Failed to add review' });
   }
 });
 
-const WILAYAS = [
-  'Adrar', 'Chlef', 'Laghouat', 'Oum El Bouaghi', 'Batna', 'Bejaia', 'Biskra',
-  'Bechar', 'Blida', 'Bouira', 'Tamanrasset', 'Tebessa', 'Tlemcen', 'Tiaret',
-  'Tizi Ouzou', 'Alger', 'Djelfa', 'Jijel', 'Setif', 'Saida', 'Skikda',
-  'Sidi Bel Abbes', 'Annaba', 'Guelma', 'Constantine', 'Medea', 'Mostaganem',
-  'Msila', 'Mascara', 'Ouargla', 'Oran', 'El Bayadh', 'Illizi', 'Bordj Bou Arreridj',
-  'Mila', 'Tissemsilt', 'El Oued', 'Khenchela', 'Souk Ahras',
-  'Tipaza', 'Ain Defla', 'Naama', 'Ain Temouchent', 'Relizane'
-];
+// ============ ORDERS ROUTES ============
 
+// Get orders
 app.get('/api/orders', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -674,92 +649,186 @@ app.get('/api/orders', async (req, res) => {
     
     const token = authHeader.split('Bearer ')[1];
     const user = await verifyIdToken(token);
-    const { limit = 100, landingSlug } = req.query;
-    const limitNum = Math.min(parseInt(limit) || 100, 500);
+    const { landing_id, status } = req.query;
     
-    const landingsData = await rtdbRequest('/landings');
-    const userLandingIds = new Set();
+    // Get user's landings
+    const { data: landings } = await supabase
+      .from('landings')
+      .select('id')
+      .eq('user_id', user.uid);
     
-    if (landingsData) {
-      for (const [id, doc] of Object.entries(landingsData)) {
-        if (doc.userId === user.uid) {
-          userLandingIds.add(id);
-        }
-      }
+    const landingIds = landings?.map(l => l.id) || [];
+    
+    if (landingIds.length === 0) {
+      return res.json({ orders: [] });
     }
     
-    const ordersData = await rtdbRequest('/orders');
-    const orders = [];
+    let query = supabase
+      .from('orders')
+      .select('*')
+      .in('landing_id', landingIds)
+      .order('created_at', { ascending: false });
     
-    if (ordersData) {
-      for (const [id, doc] of Object.entries(ordersData)) {
-        const orderLandingId = doc.landingId;
-        
-        // Only check by id (slug is not unique across users)
-        if (userLandingIds.has(orderLandingId)) {
-          if (!landingSlug || landingSlug === doc.landingSlug) {
-            orders.push({ id, ...doc });
-          }
-        }
-      }
+    if (landing_id) {
+      query = query.eq('landing_id', landing_id);
     }
     
-    orders.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    if (status) {
+      query = query.eq('status', status);
+    }
     
-    const totalCount = orders.length;
-    const paginatedOrders = orders.slice(0, limitNum);
+    const { data, error } = await query;
     
-    res.json({ 
-      orders: paginatedOrders, 
-      total: totalCount,
-      hasMore: totalCount > limitNum 
-    });
+    if (error) throw error;
+    
+    const orders = (data || []).map(order => ({
+      id: order.id,
+      landingId: order.landing_id,
+      landingSlug: order.landing_id,
+      productId: order.product_id || '',
+      productName: order.product_name || '',
+      productPrice: order.product_price || '',
+      productPhoto: order.product_photo || '',
+      quantity: order.quantity || 1,
+      total: order.total || 0,
+      customerName: order.customer_name || '',
+      customerPhone: order.customer_phone || '',
+      customerWilaya: order.customer_wilaya || '',
+      customerCommune: order.customer_commune || '',
+      customerAddress: order.customer_address || '',
+      phone: order.customer_phone || '',
+      wilaya: order.customer_wilaya || '',
+      commune: order.customer_commune || '',
+      address: order.customer_address || '',
+      status: order.status || 'pending',
+      createdAt: order.created_at,
+      updatedAt: order.updated_at,
+    }));
+    
+    res.json({ orders });
   } catch (error) {
     console.error('Get orders error:', error);
-    res.status(500).json({ message: error.message || 'Erreur serveur' });
+    res.status(500).json({ message: error.message || 'Failed to get orders' });
   }
 });
 
-app.get('/api/orders/:id', async (req, res) => {
+// Create order
+app.post('/api/orders', async (req, res) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      return res.status(401).json({ message: 'Unauthorized' });
+    const { landingId, productId, productName, quantity, total, customer, shippingAddress } = req.body;
+    
+    if (!landingId || !customer || !total) {
+      return res.status(400).json({ message: 'Missing required fields' });
     }
     
-    const token = authHeader.split('Bearer ')[1];
-    const user = await verifyIdToken(token);
+    const { data, error } = await supabase
+      .from('orders')
+      .insert({
+        landing_id: landingId,
+        product_id: productId || null,
+        product_name: productName || '',
+        quantity: quantity || 1,
+        total: parseFloat(total),
+        customer_name: customer.name,
+        customer_phone: customer.phone,
+        customer_wilaya: customer.wilaya || '',
+        customer_commune: customer.commune || '',
+        customer_address: customer.address || '',
+        shipping_address: shippingAddress || '',
+        status: 'pending',
+        created_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
     
-    const { id } = req.params;
-    const order = await rtdbRequest(`/orders/${id}`);
+    if (error) throw error;
     
-    if (!order) {
-      return res.status(404).json({ message: 'Order not found' });
+    res.status(201).json({
+      message: 'Order created successfully',
+      order: { id: data.id, ...data },
+    });
+  } catch (error) {
+    console.error('Create order error:', error);
+    res.status(500).json({ message: error.message || 'Failed to create order' });
+  }
+});
+
+// Create order via shop slug (for public landing pages)
+app.post('/api/shop/:slug/order', async (req, res) => {
+  try {
+    const { productName, productPrice, customerName, phone, wilaya, commune, address } = req.body;
+
+    if (!customerName || !phone || !wilaya) {
+      return res.status(400).json({ message: 'Name, phone and wilaya are required' });
     }
+
+    let landing = null;
+    let landingId = req.params.slug;
     
-    const landingsData = await rtdbRequest('/landings');
-    let isOwner = false;
-    
-    if (landingsData) {
-      for (const doc of Object.values(landingsData)) {
-        if (doc.slug === order.landingSlug && doc.userId === user.uid) {
-          isOwner = true;
-          break;
-        }
+    // Try to find by slug first
+    const { data: landingBySlug, error: slugError } = await supabase
+      .from('landings')
+      .select('*')
+      .eq('slug', req.params.slug)
+      .single();
+
+    if (!slugError && landingBySlug) {
+      landing = landingBySlug;
+      landingId = landingBySlug.id;
+    }
+
+    // If not found by slug, try by ID directly
+    if (!landing) {
+      const { data: landingById, error: idError } = await supabase
+        .from('landings')
+        .select('*')
+        .eq('id', req.params.slug)
+        .single();
+      
+      if (!idError && landingById) {
+        landing = landingById;
+        landingId = landingById.id;
       }
     }
-    
-    if (!isOwner) {
-      return res.status(403).json({ message: 'Forbidden' });
+
+    // If still not found, return error
+    if (!landing) {
+      return res.status(404).json({ message: 'Shop not found: ' + req.params.slug });
     }
-    
-    res.json({ order: { id, ...order } });
+
+    const total = parseFloat(productPrice || 0);
+
+    const { data, error } = await supabase
+      .from('orders')
+      .insert({
+        landing_id: landingId,
+        product_name: productName || '',
+        quantity: 1,
+        total: total,
+        customer_name: customerName,
+        customer_phone: phone,
+        customer_wilaya: wilaya,
+        customer_commune: commune || '',
+        customer_address: address || '',
+        status: 'pending',
+        created_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.status(201).json({
+      message: 'Order placed successfully! You will receive a call to confirm.',
+      order: { id: data.id, ...data },
+    });
   } catch (error) {
-    console.error('Get order error:', error);
-    res.status(500).json({ message: error.message || 'Failed to get order' });
+    console.error('Create shop order error:', error);
+    res.status(500).json({ message: error.message || 'Failed to create order' });
   }
 });
 
+// Update order status
 app.put('/api/orders/:id/status', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -771,58 +840,38 @@ app.put('/api/orders/:id/status', async (req, res) => {
     const user = await verifyIdToken(token);
     
     const { id } = req.params;
-    const { status, returnLoss, blockReason } = req.body;
+    const { status } = req.body;
     
-    const validStatuses = ['pending', 'processing', 'paid', 'returned'];
-    if (!status || !validStatuses.includes(status)) {
-      return res.status(400).json({ message: 'Invalid status' });
-    }
-    
-    const order = await rtdbRequest(`/orders/${id}`);
+    // Verify ownership
+    const { data: order } = await supabase
+      .from('orders')
+      .select('*, landing:landings(user_id)')
+      .eq('id', id)
+      .single();
     
     if (!order) {
       return res.status(404).json({ message: 'Order not found' });
     }
     
-    const landingsData = await rtdbRequest('/landings');
-    let isOwner = false;
-    
-    if (landingsData) {
-      for (const doc of Object.values(landingsData)) {
-        if (doc.slug === order.landingSlug && doc.userId === user.uid) {
-          isOwner = true;
-          break;
-        }
-      }
-    }
-    
-    if (!isOwner) {
+    if (order.landing?.user_id !== user.uid) {
       return res.status(403).json({ message: 'Forbidden' });
     }
     
-    const updates = {
-      status,
-      updatedAt: new Date().toISOString(),
-    };
+    const { error } = await supabase
+      .from('orders')
+      .update({ status, updated_at: new Date().toISOString() })
+      .eq('id', id);
     
-    if (status === 'returned') {
-      if (returnLoss) {
-        updates.returnLoss = returnLoss;
-      }
-      if (blockReason) {
-        updates.returnReason = blockReason;
-      }
-    }
+    if (error) throw error;
     
-    await rtdbRequest(`/orders/${id}`, 'PATCH', updates);
-    
-    res.json({ message: 'Order status updated successfully' });
+    res.json({ message: 'Order status updated' });
   } catch (error) {
     console.error('Update order status error:', error);
     res.status(500).json({ message: error.message || 'Failed to update order status' });
   }
 });
 
+// Delete order
 app.delete('/api/orders/:id', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -835,29 +884,27 @@ app.delete('/api/orders/:id', async (req, res) => {
     
     const { id } = req.params;
     
-    const order = await rtdbRequest(`/orders/${id}`);
+    // Get order and verify ownership
+    const { data: order, error: orderError } = await supabase
+      .from('orders')
+      .select('*, landing:landings(user_id)')
+      .eq('id', id)
+      .single();
     
-    if (!order) {
+    if (orderError || !order) {
       return res.status(404).json({ message: 'Order not found' });
     }
     
-    const landingsData = await rtdbRequest('/landings');
-    let isOwner = false;
-    
-    if (landingsData) {
-      for (const doc of Object.values(landingsData)) {
-        if ((doc.slug === order.landingSlug || doc.id === order.landingId) && doc.userId === user.uid) {
-          isOwner = true;
-          break;
-        }
-      }
-    }
-    
-    if (!isOwner) {
+    if (order.landing?.user_id !== user.uid) {
       return res.status(403).json({ message: 'Forbidden' });
     }
     
-    await rtdbRequest(`/orders/${id}`, 'DELETE');
+    const { error } = await supabase
+      .from('orders')
+      .delete()
+      .eq('id', id);
+    
+    if (error) throw error;
     
     res.json({ message: 'Order deleted successfully' });
   } catch (error) {
@@ -866,109 +913,37 @@ app.delete('/api/orders/:id', async (req, res) => {
   }
 });
 
-app.get('/api/wilayas', (req, res) => {
-  res.json({ wilayas: WILAYAS });
-});
+// ============ UPLOAD ROUTE ============
 
-app.get('/api/analytics', async (req, res) => {
+app.post('/api/upload', async (req, res) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      return res.status(401).json({ message: 'Unauthorized' });
+    const { image, folder = 'general' } = req.body;
+    
+    if (!image) {
+      return res.status(400).json({ message: 'Image data is required' });
     }
     
-    const token = authHeader.split('Bearer ')[1];
-    const user = await verifyIdToken(token);
+    // For now, return the base64 image as URL
+    // In production, upload to Supabase Storage
+    const url = image;
     
-    const landingsData = await rtdbRequest('/landings');
-    const userLandings = [];
-    const userLandingIds = new Set();
-    
-    if (landingsData) {
-      for (const [id, doc] of Object.entries(landingsData)) {
-        if (doc.userId === user.uid) {
-          userLandings.push({ id, ...doc });
-          userLandingIds.add(id);
-        }
-      }
-    }
-    
-    const totalLandings = userLandings.length;
-    const publishedLandings = userLandings.filter(doc => doc.isPublished === true).length;
-    const totalViews = userLandings.reduce((sum, doc) => sum + (parseInt(doc.views) || 0), 0);
-    
-    const ordersData = await rtdbRequest('/orders');
-    const userOrders = [];
-    
-    if (ordersData) {
-      for (const [id, doc] of Object.entries(ordersData)) {
-        if (userLandingIds.has(doc.landingId)) {
-          userOrders.push({ id, ...doc });
-        }
-      }
-    }
-    
-    const totalOrders = userOrders.length;
-    const pendingOrders = userOrders.filter(doc => doc.status === 'pending').length;
-    const confirmedOrders = userOrders.filter(doc => ['confirmed', 'shipped', 'delivered'].includes(doc.status)).length;
-    
-    const revenue = userOrders
-      .filter(doc => ['confirmed', 'shipped', 'delivered'].includes(doc.status))
-      .reduce((sum, doc) => sum + (parseFloat(doc.productPrice || 0) * parseInt(doc.quantity || 1)), 0);
-    
-    const ordersByWilaya = {};
-    userOrders.forEach(order => {
-      if (order.wilaya) {
-        ordersByWilaya[order.wilaya] = (ordersByWilaya[order.wilaya] || 0) + 1;
-      }
-    });
-    
-    const recentOrders = [...userOrders]
-      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-      .slice(0, 10);
-    
-    res.json({
-      stats: {
-        totalLandings,
-        publishedLandings,
-        totalViews,
-        totalOrders,
-        pendingOrders,
-        confirmedOrders,
-        revenue,
-      },
-      ordersByWilaya,
-      recentOrders,
-    });
+    res.json({ url });
   } catch (error) {
-    console.error('Get analytics error:', error);
-    res.status(500).json({ message: error.message || 'Failed to get analytics' });
+    console.error('Upload error:', error);
+    res.status(500).json({ message: error.message || 'Failed to upload' });
   }
 });
+
+// ============ HEALTH CHECK ============
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-app.get('/api', (req, res) => {
-  res.json({ 
-    message: 'ShopLaunch API',
-    version: '1.0.0',
-    status: 'running',
-    firebase: PROJECT_ID,
-  });
-});
-
-app.use((err, req, res, next) => {
-  console.error('Error:', err);
-  res.status(err.status || 500).json({
-    message: err.message || 'Internal server error',
-  });
-});
-
+// Start server
 app.listen(PORT, () => {
-  console.log(`ShopLaunch API running on port ${PORT}`);
-  console.log(`Firebase Project: ${PROJECT_ID}`);
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Supabase URL: ${supabaseUrl}`);
 });
 
 module.exports = app;

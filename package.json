@@ -1,7 +1,7 @@
 {
   "name": "shoplaunch-backend",
   "version": "1.0.0",
-  "description": "Backend API for ShopLaunch using Firebase",
+  "description": "Backend API for ShopLaunch using Supabase",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
@@ -11,7 +11,7 @@
     "node": ">=18.0.0"
   },
   "keywords": [
-    "firebase",
+    "supabase",
     "express",
     "api",
     "shoplaunch"
@@ -19,14 +19,9 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@google-cloud/firestore": "^8.3.0",
-    "@google-cloud/storage": "^7.19.0",
+    "@supabase/supabase-js": "^2.101.1",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
-    "express": "^4.21.0",
-    "firebase": "^11.0.0",
-    "firebase-admin": "^12.6.0",
-    "multer": "^1.4.5-lts.1",
-    "uuid": "^10.0.0"
+    "express": "^4.21.0"
   }
 }

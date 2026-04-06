@@ -88,9 +88,29 @@ router.get('/public/landing/:id', async (req, res) => {
       return res.status(404).json({ message: 'Landing not found' });
     }
 
-    res.json({ landing: { id: landingDoc.id, ...landingDoc.data() } });
+    const data = landingDoc.data();
+    if (!data.isPublished) {
+      return res.status(403).json({ message: 'Landing is not published' });
+    }
+
+    res.json({ landing: { id: landingDoc.id, ...data } });
   } catch (error) {
     console.error('Get public landing error:', error);
+    res.status(500).json({ message: 'Failed to get landing' });
+  }
+});
+
+router.get('/preview/:id', async (req, res) => {
+  try {
+    const landingDoc = await db.collection('landings').doc(req.params.id).get();
+    
+    if (!landingDoc.exists) {
+      return res.status(404).json({ message: 'Landing not found' });
+    }
+
+    res.json({ landing: { id: landingDoc.id, ...landingDoc.data() } });
+  } catch (error) {
+    console.error('Get preview landing error:', error);
     res.status(500).json({ message: 'Failed to get landing' });
   }
 });
