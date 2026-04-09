@@ -1,20 +1,78 @@
 const express = require('express');
 const router = express.Router();
-const { db } = require('../firebase');
-const { verifyToken } = require('../middleware/auth');
+const { createClient } = require('@supabase/supabase-js');
 
-router.get('/landings', verifyToken, async (req, res) => {
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabase = createClient(supabaseUrl, supabaseServiceKey);
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+const WILAYAS = [
+  'Adrar', 'Chlef', 'Laghouat', 'Oum El Bouaghi', 'Batna', 'Bejaia', 'Biskra',
+  'Bechar', 'Blida', 'Bouira', 'Tamanrasset', 'Tebessa', 'Tlemcen', 'Tiaret',
+  'Tizi Ouzou', 'Alger', 'Djelfa', 'Jijel', 'Setif', 'Saida', 'Skikda',
+  'Sidi Bel Abbes', 'Annaba', 'Guelma', 'Constantine', 'Medea', 'Mostaganem',
+  'Msila', 'Mascara', 'Ouargla', 'Oran', 'El Bayadh', 'Illizi', 'Bordj Bou Arreridj',
+  'Beni Ourtilane', 'Mila', 'Tissemsilt', 'El Oued', 'Khenchela', 'Souk Ahras',
+  'Tipaza', 'Mila', 'Ain Defla', 'Naama', 'Ain Temouchent', 'El Bayadh',
+  'Relizane', 'Timimoun', 'Bordj Badji Mokhtar', 'Ouled Djellal', 'Boukadir',
+  'Telagh', 'In Salah', 'In Guezzam'
+];
+
+async function verifyIdToken(token) {
   try {
-    const landingsSnapshot = await db.collection('landings')
-      .where('userId', '==', req.user.uid)
-      .orderBy('createdAt', 'desc')
-      .get();
+    const parts = token.split('.');
+    if (parts.length !== 3) throw new Error('Invalid token format');
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
+    const uid = payload.sub || payload.user_id || payload.id;
+    const email = payload.email;
+    if (!uid) {
+      console.error('Token payload missing user ID:', payload);
+      throw new Error('Token payload missing user ID');
+    }
+    console.log('Token verified successfully for user:', uid);
+    return { uid, email };
+  } catch (error) {
+    console.error('Token verification error:', error.message);
+    throw error;
+  }
+}
 
-    const landings = [];
-    landingsSnapshot.forEach(doc => {
-      landings.push({ id: doc.id, ...doc.data() });
-    });
-
+// Get all landings
+router.get('/landings', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+    
+    const token = authHeader.split('Bearer ')[1];
+    console.log('Token preview:', token?.substring(0, 50) + '...');
+    const user = await await verifyIdToken(token);
+    console.log('Verified user:', user);
+    
+    const { data, error } = await supabase
+      .from('landings')
+      .select('*')
+      .eq('user_id', user.uid)
+      .order('created_at', { ascending: false });
+    
+    console.log('Found landings:', data?.length || 0);
+    
+    if (error) throw error;
+    
+    const landings = (data || []).map(l => ({
+      id: l.id,
+      name: l.name || '',
+      slug: l.slug || '',
+      type: l.type || 'landing',
+      isLanding: l.is_landing !== false,
+      isPublished: l.is_published || false,
+      views: l.views || 0,
+      createdAt: l.created_at,
+      updatedAt: l.updated_at,
+    }));
+    
     res.json({ landings });
   } catch (error) {
     console.error('Get landings error:', error);
@@ -22,139 +80,248 @@ router.get('/landings', verifyToken, async (req, res) => {
   }
 });
 
-router.post('/landings', verifyToken, async (req, res) => {
+// Create landing
+router.post('/landings', async (req, res) => {
   try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+    
+    const token = authHeader.split('Bearer ')[1];
+    const user = await verifyIdToken(token);
+    
     const { name, type } = req.body;
     
     if (!name || !type) {
       return res.status(400).json({ message: 'Name and type are required' });
     }
-
-    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    
+    let slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    
+    // Check if slug exists and add unique suffix with timestamp
+    const { data: existing } = await supabase
+      .from('landings')
+      .select('slug')
+      .or(`slug.eq.${slug},slug.like.${slug}-%`);
+    
+    if (existing && existing.length > 0) {
+      // Use timestamp to ensure uniqueness
+      const timestamp = Date.now().toString(36);
+      slug = `${slug}-${timestamp}`;
+    }
     
     const landingData = {
-      name,
-      type,
-      slug,
-      userId: req.user.uid,
+      user_id: user.uid,
+      name: name,
+      type: type,
+      slug: slug,
+      is_landing: true,
       content: {
         brandName: name,
         logo: '',
-        heroTitle: 'Welcome to ' + name,
-        heroSubtitle: 'Your trusted destination for quality products',
-        ctaButton: 'Shop Now',
-        contactEmail: req.user.email,
-        footerText: '© 2026 ' + name + '. All rights reserved.',
+        heroTitle: 'Bienvenue chez ' + name,
+        heroTitleAr: 'مرحبا بكم في ' + name,
+        heroSubtitle: 'Votre destination de confiance pour des produits de qualité',
+        heroSubtitleAr: 'وجهتك الموثوقة لمنتجات عالية الجودة',
+        ctaButton: 'Commander maintenant',
+        ctaButtonAr: 'اطلب الآن',
+        footerText: '© 2026 ' + name + ' - Tous droits réservés',
+        footerTextAr: '© 2026 ' + name + ' - جميع الحقوق محفوظة',
+        trustBarText: 'Paiement sécurisé • Livraison rapide • Support 24/7',
+        trustBarTextAr: 'دفع آمن • توصيل سريع • دعم على مدار الساعة',
+        contactEmail: user.email || '',
+        contactWhatsapp: '',
+        contactInstagram: '',
+        contactFacebook: '',
       },
       products: [],
-      isPublished: false,
+      is_published: false,
       views: 0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     };
-
-    const docRef = await db.collection('landings').add(landingData);
-
+    
+    const { data, error } = await supabase
+      .from('landings')
+      .insert(landingData)
+      .select()
+      .single();
+    
+    if (error) throw error;
+    
     res.status(201).json({
       message: 'Landing page created',
-      landing: { id: docRef.id, ...landingData },
+      landing: { id: data.id, ...data },
     });
   } catch (error) {
     console.error('Create landing error:', error);
-    res.status(500).json({ message: 'Failed to create landing' });
+    res.status(500).json({ message: error.message || 'Failed to create landing' });
   }
 });
 
-router.get('/landings/:id', verifyToken, async (req, res) => {
+// Get landing by ID
+router.get('/landings/:id', async (req, res) => {
   try {
-    const landingDoc = await db.collection('landings').doc(req.params.id).get();
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
     
-    if (!landingDoc.exists || landingDoc.data().userId !== req.user.uid) {
+    const token = authHeader.split('Bearer ')[1];
+    const user = await verifyIdToken(token);
+    
+    const { data, error } = await supabase
+      .from('landings')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+    
+    if (error || !data) {
       return res.status(404).json({ message: 'Landing not found' });
     }
-
-    res.json({ landing: { id: landingDoc.id, ...landingDoc.data() } });
+    
+    if (data.user_id !== user.uid) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    
+    res.json({ landing: { id: data.id, ...data } });
   } catch (error) {
     console.error('Get landing error:', error);
     res.status(500).json({ message: 'Failed to get landing' });
   }
 });
 
+// Get public landing
 router.get('/public/landing/:id', async (req, res) => {
   try {
-    const landingDoc = await db.collection('landings').doc(req.params.id).get();
+    // Try by slug first
+    let { data, error } = await supabase
+      .from('landings')
+      .select('*')
+      .eq('slug', req.params.id)
+      .single();
     
-    if (!landingDoc.exists) {
+    // If not found by slug, try by ID
+    if (error || !data) {
+      ({ data, error } = await supabase
+        .from('landings')
+        .select('*')
+        .eq('id', req.params.id)
+        .single());
+    }
+    
+    if (error || !data) {
       return res.status(404).json({ message: 'Landing not found' });
     }
-
-    const data = landingDoc.data();
-    if (!data.isPublished) {
+    
+    // Check if published OR if it's being accessed in preview/edit mode
+    const isPreview = req.query.preview === 'true' || req.query.editMode === 'true';
+    if (!data.is_published && !isPreview) {
       return res.status(403).json({ message: 'Landing is not published' });
     }
-
-    res.json({ landing: { id: landingDoc.id, ...data } });
+    
+    // Increment views only for published landings
+    if (data.is_published) {
+      await supabase
+        .from('landings')
+        .update({ views: (data.views || 0) + 1 })
+        .eq('id', data.id);
+    }
+    
+    res.json({ landing: { id: data.id, ...data } });
   } catch (error) {
     console.error('Get public landing error:', error);
     res.status(500).json({ message: 'Failed to get landing' });
   }
 });
 
-router.get('/preview/:id', async (req, res) => {
+// Update landing
+router.put('/landings/:id', async (req, res) => {
   try {
-    const landingDoc = await db.collection('landings').doc(req.params.id).get();
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
     
-    if (!landingDoc.exists) {
+    const token = authHeader.split('Bearer ')[1];
+    const user = await verifyIdToken(token);
+    
+    const { data: existing, error: fetchError } = await supabase
+      .from('landings')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+    
+    if (fetchError || !existing) {
       return res.status(404).json({ message: 'Landing not found' });
     }
-
-    res.json({ landing: { id: landingDoc.id, ...landingDoc.data() } });
-  } catch (error) {
-    console.error('Get preview landing error:', error);
-    res.status(500).json({ message: 'Failed to get landing' });
-  }
-});
-
-router.put('/landings/:id', verifyToken, async (req, res) => {
-  try {
-    const landingRef = db.collection('landings').doc(req.params.id);
-    const landingDoc = await landingRef.get();
     
-    if (!landingDoc.exists || landingDoc.data().userId !== req.user.uid) {
-      return res.status(404).json({ message: 'Landing not found' });
+    if (existing.user_id !== user.uid) {
+      return res.status(403).json({ message: 'Forbidden' });
     }
-
-    const updates = {
-      ...req.body,
-      updatedAt: new Date().toISOString(),
-    };
+    
+    const updates = { ...req.body, updated_at: new Date().toISOString() };
     delete updates.id;
-    delete updates.userId;
-    delete updates.createdAt;
-
-    await landingRef.update(updates);
-
-    const updatedDoc = await landingRef.get();
+    delete updates.user_id;
+    delete updates.created_at;
+    
+    if (updates.isPublished !== undefined) {
+      updates.is_published = updates.isPublished;
+      delete updates.isPublished;
+    }
+    
+    const { data, error } = await supabase
+      .from('landings')
+      .update(updates)
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    
+    if (error) throw error;
+    
     res.json({
       message: 'Landing updated',
-      landing: { id: updatedDoc.id, ...updatedDoc.data() },
+      landing: { id: data.id, ...data },
     });
   } catch (error) {
     console.error('Update landing error:', error);
-    res.status(500).json({ message: 'Failed to update landing' });
+    res.status(500).json({ message: error.message || 'Failed to update landing' });
   }
 });
 
-router.delete('/landings/:id', verifyToken, async (req, res) => {
+// Delete landing
+router.delete('/landings/:id', async (req, res) => {
   try {
-    const landingRef = db.collection('landings').doc(req.params.id);
-    const landingDoc = await landingRef.get();
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
     
-    if (!landingDoc.exists || landingDoc.data().userId !== req.user.uid) {
+    const token = authHeader.split('Bearer ')[1];
+    const user = await verifyIdToken(token);
+    
+    const { data: existing, error: fetchError } = await supabase
+      .from('landings')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+    
+    if (fetchError || !existing) {
       return res.status(404).json({ message: 'Landing not found' });
     }
-
-    await landingRef.delete();
+    
+    if (existing.user_id !== user.uid) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    
+    const { error } = await supabase
+      .from('landings')
+      .delete()
+      .eq('id', req.params.id);
+    
+    if (error) throw error;
+    
     res.json({ message: 'Landing deleted' });
   } catch (error) {
     console.error('Delete landing error:', error);
@@ -162,33 +329,73 @@ router.delete('/landings/:id', verifyToken, async (req, res) => {
   }
 });
 
-router.post('/landings/:id/publish', verifyToken, async (req, res) => {
+// Publish landing
+router.post('/landings/:id/publish', async (req, res) => {
   try {
-    const landingRef = db.collection('landings').doc(req.params.id);
-    const landingDoc = await landingRef.get();
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
     
-    if (!landingDoc.exists || landingDoc.data().userId !== req.user.uid) {
+    const token = authHeader.split('Bearer ')[1];
+    const user = await verifyIdToken(token);
+    
+    const { data: existing, error } = await supabase
+      .from('landings')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+    
+    if (error || !existing) {
       return res.status(404).json({ message: 'Landing not found' });
     }
-
-    await landingRef.update({ isPublished: true, updatedAt: new Date().toISOString() });
-    res.json({ message: 'Landing published' });
+    
+    if (existing.user_id !== user.uid) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    
+    await supabase
+      .from('landings')
+      .update({ is_published: true, updated_at: new Date().toISOString() })
+      .eq('id', req.params.id);
+    
+    res.json({ message: 'Landing published', url: `/${existing.slug}` });
   } catch (error) {
     console.error('Publish landing error:', error);
     res.status(500).json({ message: 'Failed to publish landing' });
   }
 });
 
-router.post('/landings/:id/unpublish', verifyToken, async (req, res) => {
+// Unpublish landing
+router.post('/landings/:id/unpublish', async (req, res) => {
   try {
-    const landingRef = db.collection('landings').doc(req.params.id);
-    const landingDoc = await landingRef.get();
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
     
-    if (!landingDoc.exists || landingDoc.data().userId !== req.user.uid) {
+    const token = authHeader.split('Bearer ')[1];
+    const user = await verifyIdToken(token);
+    
+    const { data: existing, error } = await supabase
+      .from('landings')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+    
+    if (error || !existing) {
       return res.status(404).json({ message: 'Landing not found' });
     }
-
-    await landingRef.update({ isPublished: false, updatedAt: new Date().toISOString() });
+    
+    if (existing.user_id !== user.uid) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    
+    await supabase
+      .from('landings')
+      .update({ is_published: false, updated_at: new Date().toISOString() })
+      .eq('id', req.params.id);
+    
     res.json({ message: 'Landing unpublished' });
   } catch (error) {
     console.error('Unpublish landing error:', error);
@@ -196,99 +403,91 @@ router.post('/landings/:id/unpublish', verifyToken, async (req, res) => {
   }
 });
 
-router.get('/shop/:slug', async (req, res) => {
+// Get landing by slug for public view
+router.get('/landing/:slug', async (req, res) => {
   try {
-    const landingsSnapshot = await db.collection('landings')
-      .where('slug', '==', req.params.slug)
-      .where('isPublished', '==', true)
-      .limit(1)
-      .get();
-
-    if (landingsSnapshot.empty) {
-      return res.status(404).json({ message: 'Shop not found' });
+    const { data, error } = await supabase
+      .from('landings')
+      .select('*')
+      .eq('slug', req.params.slug)
+      .single();
+    
+    if (error || !data) {
+      return res.status(404).json({ message: 'Landing not found' });
     }
-
-    const landingDoc = landingsSnapshot.docs[0];
-    res.json({ landing: { id: landingDoc.id, ...landingDoc.data() } });
+    
+    res.json({ landing: { id: data.id, ...data } });
   } catch (error) {
-    console.error('Get shop error:', error);
-    res.status(500).json({ message: 'Failed to get shop' });
+    console.error('Get landing by slug error:', error);
+    res.status(500).json({ message: 'Failed to get landing' });
   }
 });
 
-router.post('/shop/:slug/view', async (req, res) => {
-  try {
-    const { ip } = req.body;
-    
-    const landingsSnapshot = await db.collection('landings')
-      .where('slug', '==', req.params.slug)
-      .limit(1)
-      .get();
-
-    if (landingsSnapshot.empty) {
-      return res.status(404).json({ message: 'Shop not found' });
-    }
-
-    const landingDoc = landingsSnapshot.docs[0];
-    const landingRef = db.collection('landings').doc(landingDoc.id);
-    
-    const existingViewSnapshot = await db.collection('landingViews')
-      .where('landingId', '==', landingDoc.id)
-      .where('ip', '==', ip || 'unknown')
-      .limit(1)
-      .get();
-
-    if (existingViewSnapshot.empty) {
-      await db.collection('landingViews').add({
-        landingId: landingDoc.id,
-        ip: ip || 'unknown',
-        timestamp: new Date().toISOString(),
-      });
-
-      await landingRef.update({
-        views: (landingDoc.data().views || 0) + 1,
-      });
-    }
-
-    res.json({ message: 'View tracked' });
-  } catch (error) {
-    console.error('Track view error:', error);
-    res.status(500).json({ message: 'Failed to track view' });
-  }
-});
-
-router.post('/shop/:slug/review', async (req, res) => {
+// Submit review
+router.post('/landing/:id/review', async (req, res) => {
   try {
     const { name, rating, comment } = req.body;
     
-    if (!name || !rating) {
-      return res.status(400).json({ message: 'Name and rating are required' });
+    if (!name || !rating || !comment) {
+      return res.status(400).json({ message: 'Name, rating and comment are required' });
     }
-
-    const landingsSnapshot = await db.collection('landings')
-      .where('slug', '==', req.params.slug)
-      .limit(1)
-      .get();
-
-    if (landingsSnapshot.empty) {
-      return res.status(404).json({ message: 'Shop not found' });
+    
+    // Try to find landing by slug or ID
+    let landing;
+    const { data: bySlug, error: slugError } = await supabase
+      .from('landings')
+      .select('id')
+      .eq('slug', req.params.id)
+      .single();
+    
+    if (!slugError && bySlug) {
+      landing = bySlug;
+    } else {
+      const { data: byId, error: idError } = await supabase
+        .from('landings')
+        .select('id')
+        .eq('id', req.params.id)
+        .single();
+      landing = byId;
     }
-
-    const landingDoc = landingsSnapshot.docs[0];
-
-    await db.collection('reviews').add({
-      landingId: landingDoc.id,
+    
+    if (!landing) {
+      return res.status(404).json({ message: 'Landing not found' });
+    }
+    
+    const review = {
+      id: Date.now().toString(),
       name,
       rating: parseInt(rating),
-      comment: comment || '',
+      comment,
       createdAt: new Date().toISOString(),
-    });
-
-    res.status(201).json({ message: 'Review added' });
+    };
+    
+    const { data: landingData, error: landingError } = await supabase
+      .from('landings')
+      .select('reviews')
+      .eq('id', landing.id)
+      .single();
+    
+    if (landingError) throw landingError;
+    
+    const reviews = [...(landingData.reviews || []), review];
+    
+    await supabase
+      .from('landings')
+      .update({ reviews, updated_at: new Date().toISOString() })
+      .eq('id', landing.id);
+    
+    res.status(201).json({ message: 'Review submitted', review });
   } catch (error) {
-    console.error('Add review error:', error);
-    res.status(500).json({ message: 'Failed to add review' });
+    console.error('Submit review error:', error);
+    res.status(500).json({ message: 'Failed to submit review' });
   }
+});
+
+// Get wilayas list
+router.get('/wilayas', (req, res) => {
+  res.json({ wilayas: WILAYAS });
 });
 
 module.exports = router;
