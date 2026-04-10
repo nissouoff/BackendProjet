@@ -221,12 +221,24 @@ router.get('/public/landing/:id', async (req, res) => {
       return res.status(403).json({ message: 'Landing is not published' });
     }
     
-    // Increment views only for published landings
+    // Increment views only for published landings and track unique views
     if (data.is_published) {
-      await supabase
-        .from('landings')
-        .update({ views: (data.views || 0) + 1 })
-        .eq('id', data.id);
+      const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
+      
+      // Try to insert view record - if it already exists, it will fail silently
+      const { error: viewError } = await supabase
+        .from('landing_views')
+        .insert({ landing_id: data.id, ip_address: clientIp })
+        .select()
+        .single();
+      
+      // Only increment views if this is a new unique view
+      if (!viewError) {
+        await supabase
+          .from('landings')
+          .update({ views: (data.views || 0) + 1 })
+          .eq('id', data.id);
+      }
     }
     
     res.json({ landing: { id: data.id, ...data } });

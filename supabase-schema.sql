@@ -43,6 +43,15 @@ CREATE TABLE orders (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Create landing_views table to track unique views
+CREATE TABLE landing_views (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  landing_id UUID REFERENCES landings(id) ON DELETE CASCADE,
+  ip_address TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(landing_id, ip_address)
+);
+
 -- Create indexes
 CREATE INDEX idx_landings_user_id ON landings(user_id);
 CREATE INDEX idx_landings_slug ON landings(slug);
@@ -50,13 +59,17 @@ CREATE INDEX idx_landings_is_published ON landings(is_published);
 CREATE INDEX idx_reviews_landing_id ON reviews(landing_id);
 CREATE INDEX idx_orders_landing_id ON orders(landing_id);
 CREATE INDEX idx_orders_status ON orders(status);
+CREATE INDEX idx_landing_views_landing_id ON landing_views(landing_id);
+CREATE INDEX idx_landing_views_ip ON landing_views(ip_address);
 
 -- Enable Row Level Security (RLS)
 ALTER TABLE landings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE reviews ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE landing_views ENABLE ROW LEVEL SECURITY;
 
 -- Create policies (allow all for now - adjust based on your auth needs)
 CREATE POLICY "Allow all" ON landings FOR ALL USING (true);
 CREATE POLICY "Allow all" ON reviews FOR ALL USING (true);
 CREATE POLICY "Allow all" ON orders FOR ALL USING (true);
+CREATE POLICY "Allow all" ON landing_views FOR ALL USING (true);
